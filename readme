@@ -1,0 +1,34 @@
+# 进入文件夹
+cd /Volumes/T7/VSCode/AlphaHunter/
+
+# 初始化 Git 仓库
+git init
+
+# (可选) 创建 .gitignore 文件，防止上传日志文件和缓存
+echo "log.txt" >> .gitignore
+echo "__pycache__/" >> .gitignore
+echo ".DS_Store" >> .gitignore
+
+# 添加所有文件到暂存区
+git add .
+
+# 提交更改
+git commit -m "Initial commit: Stock system"
+
+# 关联远程 GitHub 仓库 (请替换为你刚才复制的地址)
+git remote add origin https://github.com/ZhangZhHua/AlphaHunter.git
+
+# 设定主分支名为 main
+git branch -M main
+
+# 推送到 GitHub
+git push -u origin main
+
+
+
+git add .
+git commit -m "Update portfolio config"
+git push
+
+拉取新代码
+git pull

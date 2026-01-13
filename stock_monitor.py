@@ -275,8 +275,8 @@ if __name__ == "__main__":
     monitor = Monitor()
     monitor.run()
 
-    
-    #  nohup python3 /Volumes/T7/VSCode/AlphaHunter/stock_monitor.py > /Volumes/T7/VSCode/AlphaHunter/log.txt 2>&1 &
+
+    #  nohup python3 -u /Volumes/T7/VSCode/AlphaHunter/stock_monitor.py > /Volumes/T7/VSCode/AlphaHunter/log.txt 2>&1 &
 
     #  ps -ef | grep stock_monitor.py
     #     (base) macbook@ZhonghuadeMac-mini:/Volumes/T7/VSCode/AlphaHunter$ ps -ef | grep stock_monitor.py
