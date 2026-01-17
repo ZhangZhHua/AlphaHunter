@@ -32,3 +32,14 @@ git push
 
 拉取新代码
 git pull
+
+
+
+#  nohup python3 -u /Volumes/T7/VSCode/AlphaHunter/Monitor/stock_monitor.py > /Volumes/T7/VSCode/AlphaHunter/Monitor/log.txt 2>&1 &
+
+#  ps -ef | grep stock_monitor.py
+#     (base) macbook@ZhonghuadeMac-mini:/Volumes/T7/VSCode/AlphaHunter$ ps -ef | grep stock_monitor.py
+#   501 35754 34049   0  1:58下午 ttys009    0:00.42 python3 /Volumes/T7/VSCode/AlphaHunter/stock_monitor.py
+#   501 36085 34049   0  2:07下午 ttys009    0:00.00 grep stock_monitor.py
+
+#  kill 35754
