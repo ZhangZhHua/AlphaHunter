@@ -5,184 +5,260 @@ import os
 import sys
 from datetime import datetime, time as dtime, timedelta, date
 import warnings
-from chinese_calendar import is_holiday, is_workday
-HAS_CALENDAR = True
+
+# 尝试导入中国节假日库
+try:
+    from chinese_calendar import is_holiday, is_workday
+    HAS_CALENDAR = True
+except ImportError:
+    HAS_CALENDAR = False
+    print("[System] 未检测到 chinese_calendar 库，将仅依据周末判断休市。")
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置管理模块 (支持热更新)
+# 1. 智能配置管理
 # ==========================================
 class ConfigManager:
-    def __init__(self, file_path='portfolio.json'):
+    def __init__(self, file_path='/Volumes/T7/VSCode/AlphaHunter/Portfolio/portfolio.json'):
         self.file_path = file_path
         self.last_mtime = 0
-        self.config = {}
+        self.config = None 
 
-    def load(self):
-        """加载配置文件，支持热更新"""
+    def check_and_reload(self):
         try:
             if not os.path.exists(self.file_path):
-                print(f"[Error] 找不到配置文件: {self.file_path}")
-                return None
+                print(f"\r[Error] 找不到配置文件: {self.file_path} (保持旧配置运行)", end="")
+                return False, self.config
 
-            # 检查文件修改时间，没变就不读取IO
             current_mtime = os.path.getmtime(self.file_path)
-            # 强制每分钟至少重读一次，或者文件变动时重读
-            if current_mtime != self.last_mtime or not self.config:
-                with open(self.file_path, 'r', encoding='utf-8') as f:
-                    self.config = json.load(f)
-                    self.last_mtime = current_mtime
-                # print(f"[System] 配置已更新/加载") # 调试用，生产环境可注释
-            return self.config
+            if current_mtime == self.last_mtime and self.config is not None:
+                return False, self.config
+
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                new_config = json.load(f)
+            
+            if "token" not in new_config or "portfolio" not in new_config:
+                return False, self.config
+
+            self.config = new_config
+            self.last_mtime = current_mtime
+            
+            stock_names = [s['name'] for s in self.config['portfolio']]
+            # 使用 \r 清除之前的等待日志，保持界面整洁
+            print(f"\n[System] 配置热重载成功! 监控: {stock_names}")
+            
+            return True, self.config
+
         except Exception as e:
-            print(f"[Error] 配置文件读取失败: {e}")
-            return self.config # 返回旧配置防止崩溃
+            print(f"\n[Config] 读取异常: {e}")
+            return False, self.config
 
 # ==========================================
-# 2. 交易日历模块
+# 2. 交易日历模块 (逻辑增强)
 # ==========================================
 class MarketCalendar:
     @staticmethod
-    def is_trading_day():
-        """
-        判断今天是否为A股交易日
-        逻辑：
-        1. 周末(周六周日) -> 休市
-        2. 法定节假日 -> 休市
-        3. 调休的周六日 -> A股通常依然休市 (与正常工作日不同)
-        """
-        today = date.today()
-        
-        # 1. 基础判断：如果是周六周日
-        if today.weekday() >= 5:
-            return False
-
-        # 2. 节假日库判断
+    def is_trading_day(dt_date):
+        """判断某一天是否是交易日"""
+        if dt_date.weekday() >= 5: return False
         if HAS_CALENDAR:
-            # is_holiday 返回 True 表示是假期(含周末)
-            # is_workday 返回 True 表示是工作日(含调休)
-            
-            # 这里的逻辑比较绕：A股不仅节假日不开，调休上班的周末也不开
-            # 所以逻辑是：必须是法定工作日，且不能是周末
-            if is_holiday(today):
-                return False
-            
-            # 如果是调休上班的周末（is_workday是True，但weekday是5或6），股市是不开的
-            if is_workday(today) and today.weekday() >= 5:
-                return False
-                
+            if is_holiday(dt_date): return False
+            if is_workday(dt_date) and dt_date.weekday() >= 5: return False
         return True
 
     @staticmethod
-    def get_seconds_until_market_open():
-        """计算距离下一个交易日开盘(9:15)还有多少秒"""
+    def get_next_market_open_time():
+        """
+        计算下一个开启监控的时间点。
+        返回: datetime 对象
+        """
         now = datetime.now()
-        target_date = now.date()
         
-        # 寻找下一个交易日
-        while True:
-            # 如果是今天，但已经过了收盘时间(15:30后算过)，则算明天
-            if target_date == now.date() and now.time() > dtime(15, 30):
-                target_date += timedelta(days=1)
-                continue
+        # 场景 A: 今天是交易日，且还没到下午收盘 (午休也算在内，因为要等下午开盘)
+        if MarketCalendar.is_trading_day(now.date()):
+            # 1. 如果还没到早上开盘 ( < 09:15 ) -> 目标是今天 09:15
+            if now.time() < dtime(9, 15):
+                return datetime.combine(now.date(), dtime(9, 15))
             
-            # 检查 target_date 是否是交易日
-            # 这里简化逻辑：如果是周末就跳过，如果是今天且没过收盘则检查是否交易日
-            is_trade = True
-            if target_date.weekday() >= 5: is_trade = False
-            if HAS_CALENDAR and is_holiday(target_date): is_trade = False
+            # 2. 如果是午休时间 ( 11:35 - 12:55 ) -> 目标是今天 12:55
+            if dtime(11, 35) < now.time() < dtime(12, 55):
+                return datetime.combine(now.date(), dtime(12, 55))
             
-            if is_trade:
-                break
+            # 3. 如果还在交易时间段内 (09:15-11:35 或 12:55-15:05) -> 立即返回当前时间 (无需等待)
+            # 注意：这里稍微放宽一点范围，防止临界点卡死
+            if now.time() <= dtime(15, 5):
+                return now 
+
+        # 场景 B: 今天已收盘 或 今天非交易日 -> 找下一个交易日的 09:15
+        target_date = now.date() + timedelta(days=1)
+        while not MarketCalendar.is_trading_day(target_date):
             target_date += timedelta(days=1)
-        
-        target_time = datetime.combine(target_date, dtime(9, 15))
-        delta = (target_time - now).total_seconds()
-        return max(60, delta) # 至少休眠60秒
+            
+        return datetime.combine(target_date, dtime(9, 15))
 
 # ==========================================
 # 3. 推送服务
 # ==========================================
 class Pusher:
-    def __init__(self, config_manager):
-        self.cfg_mgr = config_manager
+    def __init__(self, token):
+        self.token = token
         self.url = "http://www.pushplus.plus/send"
 
+    def update_token(self, new_token):
+        self.token = new_token
+
     def send(self, title, content):
-        cfg = self.cfg_mgr.load()
-        if not cfg: return
-        
-        data = {
-            "token": cfg['token'],
-            "title": title,
-            "content": content,
-            "template": "markdown"
-        }
+        if not self.token: return
+        data = {"token": self.token, "title": title, "content": content, "template": "markdown"}
         try:
             requests.post(self.url, json=data, timeout=10)
-        except Exception as e:
-            print(f"[Error] 推送失败: {e}")
+        except Exception:
+            pass
 
 # ==========================================
-# 4. 数据引擎 (EastMoney)
+# 4. 数据引擎 (双接口+强伪装版)
 # ==========================================
 class EastMoneyEngine:
+    def __init__(self):
+        # 模拟真实的浏览器请求头
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "http://quote.eastmoney.com/center/gridlist.html",
+            "Host": "push2.eastmoney.com",
+            "Connection": "keep-alive"
+        }
+
+    def _get_secid(self, symbol):
+        symbol = str(symbol).strip()
+        # 沪市: 6/5/9/11开头 -> 1
+        if symbol.startswith(('6', '5', '9', '11')):
+            return f"1.{symbol}"
+        # 深市/北交: 其他 -> 0
+        return f"0.{symbol}"
+
+    def _request_batch(self, secids_str):
+        """接口A: 批量列表接口"""
+        url = "https://push2.eastmoney.com/api/qt/ulist/get"
+        params = {
+            "invt": "2", "fltt": "2", "fields": "f12,f2,f3,f10", 
+            "secids": secids_str
+        }
+        try:
+            resp = requests.get(url, params=params, headers=self.headers, timeout=5)
+            return resp.json()
+        except Exception:
+            return None
+
+    def _request_single(self, secid):
+        """接口B: 个股详情接口 (备用，更稳定)"""
+        url = "https://push2.eastmoney.com/api/qt/stock/get"
+        # f43:现价, f170:涨跌幅, f168:量比 (注意字段编号变化)
+        params = {
+            "invt": "2", "fltt": "2", "fields": "f57,f43,f170,f168",
+            "secid": secid
+        }
+        try:
+            resp = requests.get(url, params=params, headers=self.headers, timeout=5)
+            j = resp.json()
+            if j and j.get('data'):
+                d = j['data']
+                # 统一格式转换
+                return {
+                    'f12': d.get('f57'), # 代码
+                    'f2': d.get('f43'),  # 现价
+                    'f3': d.get('f170'), # 涨跌幅
+                    'f10': d.get('f168') # 量比
+                }
+            return None
+        except Exception:
+            return None
+
     def fetch(self, portfolio):
         if not portfolio: return [], 0, 0
-        try:
-            # 构造 secids
-            secids = []
-            for p in portfolio:
-                prefix = "1" if p['symbol'].startswith('6') else "0"
-                secids.append(f"{prefix}.{p['symbol']}")
-            
-            url = "https://push2.eastmoney.com/api/qt/ulist/get"
-            params = {
-                "invt": "2", "fltt": "2", "fields": "f12,f2,f3,f10", 
-                "secids": ",".join(secids)
-            }
-            
-            resp = requests.get(url, params=params, timeout=5, headers={"Referer": "https://eastmoney.com"})
-            data = resp.json().get('data', {}).get('diff', [])
-            
-            results = []
-            total_profit = 0
-            total_mv = 0
-            port_map = {p['symbol']: p for p in portfolio}
+        
+        port_map = {str(p['symbol']).strip(): p for p in portfolio}
+        secid_list = [self._get_secid(sym) for sym in port_map.keys()]
+        
+        # 1. 优先尝试批量请求
+        json_data = self._request_batch(",".join(secid_list))
+        
+        valid_data = []
+        is_batch_success = False
 
-            for item in data:
-                symbol = item['f12']
-                if symbol not in port_map or item['f2'] == '-': continue
-                
+        if json_data and json_data.get('data') and json_data['data'].get('diff'):
+            valid_data = json_data['data']['diff']
+            is_batch_success = True
+        
+        # 2. 如果批量失败，启动备用方案 (逐个请求)
+        if not is_batch_success:
+            print(f"\r[Warn] 批量接口受阻，切换单点突破模式...", end="", flush=True)
+            for secid in secid_list:
+                single_data = self._request_single(secid)
+                if single_data:
+                    valid_data.append(single_data)
+                else:
+                    # 只有单点也失败了，才是真的代码错了
+                    raw_code = secid.split('.')[1]
+                    name = port_map.get(raw_code, {}).get('name', '未知')
+                    print(f"\n   ❌ 无法获取: {name} ({secid})")
+
+        # 3. 数据清洗
+        results = []
+        tp, tmv = 0, 0
+        
+        for item in valid_data:
+            symbol = str(item['f12'])
+            if symbol not in port_map: continue
+            
+            # 价格清洗
+            try:
                 price = float(item['f2'])
-                change = float(item['f3'])
-                vol_ratio = float(item['f10']) if item['f10'] != '-' else 0.0
-                
-                cfg = port_map[symbol]
-                profit = (price - cfg['cost']) * cfg['vol']
-                profit_pct = (price - cfg['cost']) / cfg['cost'] * 100
-                mv = price * cfg['vol']
-                
-                total_profit += profit
-                total_mv += mv
-                
-                results.append({
-                    "name": cfg['name'], "symbol": symbol, "price": price,
-                    "change": change, "vol_ratio": vol_ratio,
-                    "profit": profit, "profit_pct": profit_pct, "cost": cfg['cost']
-                })
-            return results, total_profit, total_mv
-        except Exception:
-            return [], 0, 0
+                if price == 0: continue # 停牌或无效
+            except (ValueError, TypeError):
+                continue
 
+            # 涨跌幅清洗
+            try:
+                change = float(item['f3'])
+            except (ValueError, TypeError):
+                change = 0.0
+
+            # 量比清洗
+            try:
+                vol_ratio = float(item['f10'])
+            except (ValueError, TypeError):
+                vol_ratio = 0.0
+            
+            cfg = port_map[symbol]
+            profit = (price - cfg['cost']) * cfg['vol']
+            profit_pct = (price - cfg['cost']) / cfg['cost'] * 100 if cfg['cost'] != 0 else 0
+            mv = price * cfg['vol']
+            
+            tp += profit; tmv += mv
+            results.append({
+                "name": cfg['name'], "symbol": symbol, "price": price,
+                "change": change, "vol_ratio": vol_ratio,
+                "profit": profit, "profit_pct": profit_pct, "cost": cfg['cost']
+            })
+            
+        return results, tp, tmv
+        
 # ==========================================
-# 5. 核心监控逻辑
+# 5. 核心监控逻辑 (启动即反馈版)
 # ==========================================
+
 class Monitor:
     def __init__(self):
-        self.config_mgr = ConfigManager(file_path="/Volumes/T7/VSCode/AlphaHunter/Portfolio/portfolio.json")
-        self.pusher = Pusher(self.config_mgr)
+        # 请确认路径是否正确
+        self.cfg_mgr = ConfigManager(file_path="/Volumes/T7/VSCode/AlphaHunter/Portfolio/portfolio.json")
+        
+        updated, cfg = self.cfg_mgr.check_and_reload()
+        if not cfg:
+            print("❌ 启动失败：请检查 portfolio.json")
+            sys.exit(1)
+            
+        self.pusher = Pusher(cfg['token'])
         self.engine = EastMoneyEngine()
         self.alert_cooldown = {} 
         self.last_report_minute = ""
@@ -203,7 +279,6 @@ class Monitor:
         now_ts = time.time()
         for i in data:
             sym = i['symbol']
-            # 冷却30分钟
             if sym in self.alert_cooldown and now_ts - self.alert_cooldown[sym] < 1800: continue
             
             triggers = []
@@ -216,56 +291,69 @@ class Monitor:
                 sign = "+" if i['profit']>0 else ""
                 alerts.append(f"**{i['name']}**: {' '.join(triggers)}\n现价:{i['price']} 盈亏:{sign}{i['profit']:.0f}")
                 self.alert_cooldown[sym] = now_ts
-        
         if alerts: self.pusher.send("🚨 异动警报", "\n---\n".join(alerts))
 
+    def run_once_check(self):
+        """执行一次强制检查（用于启动自检）"""
+        print("[Init] 正在执行启动自检...", end="", flush=True)
+        updated, cfg = self.cfg_mgr.check_and_reload()
+        if cfg:
+            self.pusher.update_token(cfg['token'])
+            data, tp, tmv = self.engine.fetch(cfg['portfolio'])
+            if data:
+                self.pusher.send("🚀 系统上线 (启动自检)", self.generate_report(data, tp, tmv))
+                print(" -> 自检消息已发送 ✅")
+            else:
+                print(" -> 获取数据失败 ❌")
+        else:
+            print(" -> 配置加载失败 ❌")
+
     def start(self):
-        print("[System] 监控服务启动")
-        # 启动时先加载一次配置测试
-        cfg = self.config_mgr.load()
-        if not cfg: 
-            print("配置文件错误，退出"); return
-        
-        self.pusher.send("🤖 系统上线", f"监控已启动，当前持仓: {len(cfg['portfolio'])}只")
+        print(f"[System] 监控服务启动，进程ID: {os.getpid()}")
+
+        # ==========================================
+        # 🟢 核心修改：在进入死循环前，先强制运行一次
+        # 这样无论现在是几点，你都能立马收到消息
+        # ==========================================
+        self.run_once_check()
+
+        print("[System] 进入自动监控循环...")
 
         while True:
             try:
-                # 1. 检查是否是交易日
-                if not MarketCalendar.is_trading_day():
-                    sleep_sec = MarketCalendar.get_seconds_until_market_open()
-                    hours = sleep_sec / 3600
-                    print(f"\r[Sleep] 非交易日/休市。休眠 {hours:.1f} 小时...", end="", flush=True)
-                    # 避免系统时间跳变或长时间sleep不可中断，分段sleep
-                    time.sleep(min(sleep_sec, 3600)) 
-                    continue
+                # 1. 热重载配置
+                updated, cfg = self.cfg_mgr.check_and_reload()
+                if updated: self.pusher.update_token(cfg['token'])
 
+                # 2. 智能等待逻辑
+                target_dt = MarketCalendar.get_next_market_open_time()
                 now = datetime.now()
-                # 2. 检查交易时段 (9:15 - 15:05, 包含集合竞价和稍微延后)
-                is_trading = (dtime(9, 15) <= now.time() <= dtime(11, 35)) or \
-                             (dtime(12, 55) <= now.time() <= dtime(15, 5))
                 
-                if not is_trading:
-                    print(f"\r[Wait] 等待开盘... {now.strftime('%H:%M:%S')}", end="", flush=True)
-                    time.sleep(60)
-                    continue
+                # 如果现在是休市时间（包括午休）
+                if target_dt > now + timedelta(seconds=5):
+                    time_diff = target_dt - now
+                    hours = int(time_diff.total_seconds() // 3600)
+                    minutes = int((time_diff.total_seconds() % 3600) // 60)
+                    print(f"\r[Sleep] 休市中。将在 {target_dt.strftime('%H:%M')} 唤醒 (剩余 {hours}小时{minutes}分)...", end="", flush=True)
+                    
+                    while datetime.now() < target_dt:
+                        self.cfg_mgr.check_and_reload()
+                        time.sleep(60) 
+                    continue 
 
-                # 3. 加载最新配置 (实现热更新)
-                cfg = self.config_mgr.load()
-                
-                # 4. 获取数据
+                # 3. 执行监控
                 data, tp, tmv = self.engine.fetch(cfg['portfolio'])
+                
                 if not data: 
-                    time.sleep(10); continue
+                    print(f"\r[Retry] 数据空，重试...", end="", flush=True)
+                    time.sleep(5); continue
 
                 print(f"\r[Run] 监控中... 总盈亏: {tp:.0f}      ", end="", flush=True)
 
-                # 5. 异动检查
                 self.check_alerts(data, cfg['alert_config'])
 
-                # 6. 定时推送 (开盘、整点、收盘)
                 t_str = now.strftime("%H:%M")
-                report_times = ["09:30", "10:00", "11:30", "13:20", "14:40", "15:00"]
-                
+                report_times = ["09:30", "10:00", "11:00", "13:00", "14:00", "15:00"]
                 if t_str in report_times and t_str != self.last_report_minute:
                     titles = {"09:30": "🚀 开盘", "15:00": "🌙 收盘"}
                     title = titles.get(t_str, f"⏰ {now.hour}点播报")
@@ -278,11 +366,8 @@ class Monitor:
                 print("\n停止监控"); break
             except Exception as e:
                 print(f"\n[Error] {e}"); time.sleep(30)
-
 if __name__ == "__main__":
     Monitor().start()
-    
-    
     #  nohup python3 -u /Volumes/T7/VSCode/AlphaHunter/Monitor/stock_monitor.py > /Volumes/T7/VSCode/AlphaHunter/Monitor/log.txt 2>&1 &
  
     #  ps -ef | grep stock_monitor.py
@@ -291,3 +376,4 @@ if __name__ == "__main__":
     #   501 36085 34049   0  2:07下午 ttys009    0:00.00 grep stock_monitor.py
 
     #  kill 35754
+    # pkill -f stock_monitor.py
